@@ -4,27 +4,64 @@ var path = require('path')
 var fs = require('fs')
 
 test('setup', function (t) {
-  try { lockFile.unlockSync('basic-lock') } catch (er) {}
-  try { lockFile.unlockSync('sync-lock') } catch (er) {}
-  try { lockFile.unlockSync('never-forget') } catch (er) {}
-  try { lockFile.unlockSync('stale-lock') } catch (er) {}
-  try { lockFile.unlockSync('watch-lock') } catch (er) {}
-  try { lockFile.unlockSync('retry-lock') } catch (er) {}
+  try { fs.unlinkSync('owner-lock') } catch (er) {}
+  try { fs.unlinkSync('basic-lock') } catch (er) {}
+  try { fs.unlinkSync('sync-lock') } catch (er) {}
+  try { fs.unlinkSync('never-forget') } catch (er) {}
+  try { fs.unlinkSync('stale-lock') } catch (er) {}
+  try { fs.unlinkSync('watch-lock') } catch (er) {}
+  try { fs.unlinkSync('retry-lock') } catch (er) {}
   t.end()
+})
+
+test('many locks waiting with watcher', function (t) {
+  var gotlocks = 0;
+  setTimeout(function() {
+    console.log('locks '+gotlocks)
+    t.ok(gotlocks === 50)
+    t.end();
+  }, 1000)
+
+  lockFile.lock('basic-lock', function(er, lock) {
+    if (er) throw er;
+    setTimeout(function() {
+      lock.unlock()
+    }, 10)
+  })
+
+  for (var i=0; i < 50; i++)
+    lockFile.lock('basic-lock', { wait: 10000 }, function(er, lock) {
+      if (er) throw er;
+      setTimeout(function() {
+        lock.unlock()
+      }, 10)
+      gotlocks++
+    })
+})
+
+test('lock keying', function (t) {
+  lockFile.lock('owner-lock', function(er, lock1) {
+    try {
+      new LockObject('owner-lock', 'somekey', null)
+    } catch(e) {
+      t.end();
+    }
+  })
 })
 
 test('basic test', function (t) {
   lockFile.check('basic-lock', function (er, locked) {
     if (er) throw er
     t.notOk(locked)
-    lockFile.lock('basic-lock', function (er) {
+    lockFile.lock('basic-lock', function (er, lock1) {
       if (er) throw er
-      lockFile.lock('basic-lock', function (er) {
+      lockFile.lock('basic-lock', function (er, lock2) {
         t.ok(er)
+        t.notOk(lock2)
         lockFile.check('basic-lock', function (er, locked) {
           if (er) throw er
           t.ok(locked)
-          lockFile.unlock('basic-lock', function (er) {
+          lock1.unlock(function (er) {
             if (er) throw er
             lockFile.check('basic-lock', function (er, locked) {
               if (er) throw er
@@ -42,10 +79,10 @@ test('sync test', function (t) {
   var locked
   locked = lockFile.checkSync('sync-lock')
   t.notOk(locked)
-  lockFile.lockSync('sync-lock')
+  var lockObject = lockFile.lockSync('sync-lock')
   locked = lockFile.checkSync('sync-lock')
   t.ok(locked)
-  lockFile.unlockSync('sync-lock')
+  lockObject.unlockSync()
   locked = lockFile.checkSync('sync-lock')
   t.notOk(locked)
   t.end()
@@ -88,9 +125,10 @@ test('staleness test', function (t) {
       lockFile.check('stale-lock', opts, function (er, locked) {
         if (er) throw er
         t.notOk(locked)
-        lockFile.lock('stale-lock', opts, function (er) {
+        lockFile.lock('stale-lock', opts, function (er, lock1) {
+          console.log('next2')
           if (er) throw er
-          lockFile.unlock('stale-lock', function (er) {
+          lock1.unlock(function (er) {
             if (er) throw er
             t.end()
           })
@@ -108,8 +146,8 @@ test('staleness sync test', function (t) {
     var locked
     locked = lockFile.checkSync('stale-lock', opts)
     t.notOk(locked)
-    lockFile.lockSync('stale-lock', opts)
-    lockFile.unlockSync('stale-lock')
+    var lock = lockFile.lockSync('stale-lock', opts)
+    lock.unlockSync()
     t.end()
   }
 })
@@ -117,12 +155,12 @@ test('staleness sync test', function (t) {
 test('watch test', function (t) {
   var opts = { wait: 100 }
   var fdx
-  lockFile.lock('watch-lock', function (er, fd1) {
+  lockFile.lock('watch-lock', function (er, lock1) {
     if (er) throw er
     setTimeout(unlock, 10)
     function unlock () {
       console.error('unlocking it')
-      lockFile.unlockSync('watch-lock')
+      lock1.unlockSync()
       // open another file, so the fd gets reused
       // so we can know that it actually re-opened it fresh,
       // rather than just getting the same lock as before.
@@ -131,13 +169,13 @@ test('watch test', function (t) {
     }
 
     // should have gotten a new fd
-    lockFile.lock('watch-lock', opts, function (er, fd2) {
+    lockFile.lock('watch-lock', opts, function (er, lock2) {
       if (er) throw er
-      t.notEqual(fd1, fd2)
+      t.notEqual(lock1.fd, lock2.fd)
       fs.closeSync(fdx)
       fs.closeSync(fdy)
       fs.unlinkSync('x')
-      lockFile.unlockSync('watch-lock')
+      lock2.unlockSync()
       t.end()
     })
   })
@@ -158,11 +196,11 @@ test('retries', function (t) {
     process.nextTick(cb.bind(null, er))
   }
 
-  lockFile.lock('retry-lock', { retries: opens }, function (er, fd) {
+  lockFile.lock('retry-lock', { retries: opens }, function (er, lock) {
     if (er) throw er
     t.equal(opens, 0)
-    t.ok(fd)
-    lockFile.unlockSync('retry-lock')
+    t.ok(lock)
+    lock.unlockSync()
     t.end()
   })
 })
@@ -183,11 +221,11 @@ test('retryWait', function (t) {
   }
 
   var opts = { retries: opens, retryWait: 100 }
-  lockFile.lock('retry-lock', opts, function (er, fd) {
+  lockFile.lock('retry-lock', opts, function (er, lock) {
     if (er) throw er
     t.equal(opens, 0)
-    t.ok(fd)
-    lockFile.unlockSync('retry-lock')
+    t.ok(lock)
+    lock.unlockSync()
     t.end()
   })
 })
@@ -208,19 +246,21 @@ test('retry sync', function (t) {
   }
 
   var opts = { retries: opens }
-  lockFile.lockSync('retry-lock', opts)
+  var lock = lockFile.lockSync('retry-lock', opts)
+  t.ok(lock);
   t.equal(opens, 0)
-  lockFile.unlockSync('retry-lock')
+  lock.unlockSync()
   t.end()
 })
 
 test('cleanup', function (t) {
-  try { lockFile.unlockSync('basic-lock') } catch (er) {}
-  try { lockFile.unlockSync('sync-lock') } catch (er) {}
-  try { lockFile.unlockSync('never-forget') } catch (er) {}
-  try { lockFile.unlockSync('stale-lock') } catch (er) {}
-  try { lockFile.unlockSync('watch-lock') } catch (er) {}
-  try { lockFile.unlockSync('retry-lock') } catch (er) {}
+  try { fs.unlinkSync('owner-lock') } catch (er) {}
+  try { fs.unlinkSync('basic-lock') } catch (er) {}
+  try { fs.unlinkSync('sync-lock') } catch (er) {}
+  try { fs.unlinkSync('never-forget') } catch (er) {}
+  try { fs.unlinkSync('stale-lock') } catch (er) {}
+  try { fs.unlinkSync('watch-lock') } catch (er) {}
+  try { fs.unlinkSync('retry-lock') } catch (er) {}
   t.end()
 })
 

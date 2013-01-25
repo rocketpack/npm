@@ -6,12 +6,61 @@ if (process.version.match(/^v0.[456]/)) {
   wx = c.O_TRUNC | c.O_CREAT | c.O_WRONLY | c.O_EXCL
 }
 
+function LockObject(path, key, fd) {
+  this.path = path
+  this.key = key
+  this.fd = fd;
+
+  if (locks[path])
+    throw new Error('lock already taken as '+locks[path].key)
+
+  this._locked = true;
+
+  locks[path] = this
+}
+
+LockObject.prototype.unlock_ = function() {
+  if (!this._locked)
+    return
+
+  if (!locks[this.path] || locks[this.path] !== this)
+    throw new Error('attempted to unlock wrong lock ', locks[this.path])
+
+  this._locked = false
+}
+
+LockObject.prototype.unlock = function(cb) {
+  var that = this
+
+  this.unlock_()
+
+  fs.unlink(this.path, function (unlinkEr) {
+    delete locks[that.path]
+    fs.close(that.fd, function (closeEr) {
+      if (cb) cb()
+    })
+  })
+};
+
+LockObject.prototype.unlockSync = function() {
+  this.unlock_()
+
+  try { fs.unlinkSync(this.path) } catch (er) {}
+  delete locks[this.path]
+  try { fs.close(this.fd) } catch (er) {}
+};
+
+exports.LockObject = LockObject
+
 var locks = {}
 
-process.on('exit', function () {
-  // cleanup
-  Object.keys(locks).forEach(exports.unlockSync)
-})
+function cleanup() {
+  Object.keys(locks).forEach(function(path) {
+    locks[path].unlockSync()
+  })
+}
+
+process.on('exit', cleanup)
 
 // XXX https://github.com/joyent/node/issues/3555
 // Remove when node 0.8 is deprecated.
@@ -21,34 +70,28 @@ process.on('uncaughtException', function H (er) {
   })
   if (!l.length) {
     // cleanup
-    Object.keys(locks).forEach(exports.unlockSync)
+    cleanup()
     process.removeListener('uncaughtException', H)
     throw er
   }
 })
 
-exports.unlock = function (path, cb) {
-  // best-effort.  unlocking an already-unlocked lock is a noop
+function forceUnlock(path, cb) {
+  if (locks[path])
+    return locks[path].unlock(cb)
+
   fs.unlink(path, function (unlinkEr) {
-    if (!locks.hasOwnProperty(path)) return cb()
-    fs.close(locks[path], function (closeEr) {
-      delete locks[path]
-      cb()
-    })
+      if (cb) cb()
   })
 }
 
-exports.unlockSync = function (path) {
+function forceUnlockSync(path) {
+  if (locks[path])
+    return locks[path].unlockSync()
+
   try { fs.unlinkSync(path) } catch (er) {}
-  if (!locks.hasOwnProperty(path)) return
-  // best-effort.  unlocking an already-unlocked lock is a noop
-  try { fs.close(locks[path]) } catch (er) {}
-  delete locks[path]
 }
 
-
-// if the file can be opened in readonly mode, then it's there.
-// if the error is something other than ENOENT, then it's not.
 exports.check = function (path, opts, cb) {
   if (typeof opts === 'function') cb = opts, opts = {}
   fs.open(path, 'r', function (er, fd) {
@@ -106,8 +149,6 @@ exports.checkSync = function (path, opts) {
   }
 }
 
-
-
 exports.lock = function (path, opts, cb) {
   if (typeof opts === 'function') cb = opts, opts = {}
 
@@ -127,8 +168,8 @@ exports.lock = function (path, opts, cb) {
   // if this succeeds, then we're in business.
   fs.open(path, wx, function (er, fd) {
     if (!er) {
-      locks[path] = fd
-      return cb(null, fd)
+      var key = Math.random() * 100000000000;
+      return cb(null, new LockObject(path, key, fd));
     }
 
     // something other than "currently locked"
@@ -149,7 +190,7 @@ exports.lock = function (path, opts, cb) {
 
       var age = Date.now() - st.ctime.getTime()
       if (age > opts.stale) {
-        exports.unlock(path, function (er) {
+        forceUnlock(path, function (er) {
           if (er) return cb(er)
           var opts_ = Object.create(opts, { stale: { value: false }})
           exports.lock(path, opts_, cb)
@@ -173,8 +214,7 @@ function notStale (er, path, opts, cb) {
       try { watcher.close() } catch (e) {}
       clearTimeout(timer)
       var newWait = Date.now() - start
-      var opts_ = Object.create(opts, { wait: { value: newWait }})
-      exports.lock(path, opts_, cb)
+      exports.lock(path, opts, cb)
     }
 
     try {
@@ -211,8 +251,8 @@ exports.lockSync = function (path, opts) {
 
   try {
     var fd = fs.openSync(path, wx)
-    locks[path] = fd
-    return fd
+    var key = Math.random() * 100000000000;
+    return new LockObject(path, key, fd)
   } catch (er) {
     if (er.code !== 'EEXIST') return retryThrow(path, opts, er)
 
@@ -220,7 +260,7 @@ exports.lockSync = function (path, opts) {
       var st = fs.statSync(path)
       var age = Date.now() - st.ctime.getTime()
       if (age > opts.stale) {
-        exports.unlockSync(path)
+        forceUnlockSync(path)
         return exports.lockSync(path, opts)
       }
     }
