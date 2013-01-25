@@ -6,13 +6,12 @@ if (process.version.match(/^v0.[456]/)) {
   wx = c.O_TRUNC | c.O_CREAT | c.O_WRONLY | c.O_EXCL
 }
 
-function LockObject(path, key, fd) {
+function LockObject(path, fd) {
   this.path = path
-  this.key = key
   this.fd = fd;
 
   if (locks[path])
-    throw new Error('lock already taken as '+locks[path].key)
+    throw new Error('lock already taken as '+locks[path])
 
   this._locked = true;
 
@@ -168,8 +167,7 @@ exports.lock = function (path, opts, cb) {
   // if this succeeds, then we're in business.
   fs.open(path, wx, function (er, fd) {
     if (!er) {
-      var key = Math.random() * 100000000000;
-      return cb(null, new LockObject(path, key, fd));
+      return cb(null, new LockObject(path, fd));
     }
 
     // something other than "currently locked"
@@ -251,8 +249,7 @@ exports.lockSync = function (path, opts) {
 
   try {
     var fd = fs.openSync(path, wx)
-    var key = Math.random() * 100000000000;
-    return new LockObject(path, key, fd)
+    return new LockObject(path, fd)
   } catch (er) {
     if (er.code !== 'EEXIST') return retryThrow(path, opts, er)
 
